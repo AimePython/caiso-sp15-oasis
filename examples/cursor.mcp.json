@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "caiso-sp15": {
+      "command": "/ABS/PATH/TO/caiso-sp15-oasis/.venv/bin/python",
+      "args": ["-m", "sp15_oasis"],
+      "env": {
+        "SP15_ROOT": "/ABS/PATH/TO/caiso-sp15-oasis"
+      }
+    }
+  }
+}

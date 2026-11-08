@@ -1,0 +1,2 @@
+[console_scripts]
+caiso-sp15 = sp15_oasis.__main__:main

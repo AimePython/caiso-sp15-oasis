@@ -12,4 +12,5 @@ src/*.egg-info/
 data/*.sqlite
 data/*.sqlite-*
 data/*.csv
+data/*.log
 data/raw/

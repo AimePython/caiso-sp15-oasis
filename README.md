@@ -61,6 +61,14 @@ python3 -m venv .venv
 
 服务走 stdio，只在本机查询本地库，不会把 OASIS 再包成一个公开网站。
 
+从零安装、同步和接到 Cursor 见 [MCP使用指南](MCP使用指南.md)。字段中文名、OASIS 原名和单位见 [数据指标对照表](数据指标对照表.md)。
+
+每天 01:15（这台电脑的本地时间）自动补当天已经发布的数据：
+
+```bash
+./scripts/install-daily-sync.sh
+```
+
 ## 工具
 
 - `list_catalog`：节点、联络线、单位、库里有多少天

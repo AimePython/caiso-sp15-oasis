@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"sync", "status", "export", "import-csv"}
+_COMMANDS = {"sync", "status", "export", "import-csv", "watch"}
 
 
 def main() -> None:

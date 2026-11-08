@@ -40,7 +40,7 @@ cat > "$DEST" <<EOF
     <string>${PYTHON}</string>
     <string>-m</string>
     <string>sp15_oasis</string>
-    <string>sync</string>
+    <string>watch</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -65,6 +65,6 @@ EOF
 unload
 launchctl bootstrap "$DOMAIN" "$DEST"
 launchctl enable "${DOMAIN}/${LABEL}"
-echo "已登记：每天本地时间 01:15 运行 sync"
+echo "已登记：每天本地时间 01:15 开始补采，没采全会提醒，并持续补到 02:00"
 echo "任务文件：${DEST}"
 echo "日志：${ROOT}/data/sync.log"

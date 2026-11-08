@@ -19,6 +19,16 @@ def today_pt() -> date:
     return datetime.now(PT).date()
 
 
+def expected_hours(day: date) -> int:
+    """Hours in one Pacific operating day. Spring-forward is 23, fall-back is 25."""
+    nxt = day + timedelta(days=1)
+    start = datetime(day.year, day.month, day.day, tzinfo=PT)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=PT)
+    # Same-zone subtraction ignores the DST offset change, so compare in UTC.
+    elapsed = end.astimezone(UTC) - start.astimezone(UTC)
+    return int(elapsed.total_seconds() // 3600)
+
+
 def trading_bounds(start: date, end: date) -> tuple[str, str]:
     """Turn a half-open operating-day range into OASIS GMT parameters.
 

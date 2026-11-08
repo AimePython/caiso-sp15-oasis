@@ -6,16 +6,19 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sp15_oasis.calendar import floor_chunk, iter_chunks, trading_bounds
-from sp15_oasis.catalog import HUB, classify_nomogram
+from sp15_oasis.calendar import expected_hours, floor_chunk, iter_chunks, trading_bounds
+from sp15_oasis.catalog import HUB, classify_nomogram, node_ids, tie_ids
 from sp15_oasis.db import connect, upsert
+from sp15_oasis.freshness import AS_REQUIREMENTS, AS_TYPES, LMP_TYPES, TIE_DIRECTIONS, day_gaps
 from sp15_oasis.parse import normalize_lmp, normalize_usage
 from sp15_oasis.query import query_sql, training_panel
+from sp15_oasis.watch import run_watch
 
 
 class CalendarTests(unittest.TestCase):
@@ -39,6 +42,11 @@ class CalendarTests(unittest.TestCase):
             trading_bounds(date(2026, 11, 1), date(2026, 11, 2)),
             ("20261101T07:00-0000", "20261102T08:00-0000"),
         )
+
+    def test_expected_hours_follow_pacific_daylight_time(self):
+        self.assertEqual(expected_hours(date(2026, 11, 7)), 24)
+        self.assertEqual(expected_hours(date(2026, 3, 8)), 23)
+        self.assertEqual(expected_hours(date(2026, 11, 1)), 25)
 
 
 class ClassifyTests(unittest.TestCase):
@@ -238,6 +246,165 @@ def _lmp(node: str, lmp_type: str, value: float) -> dict:
         "xml_data_item": f"{lmp_type}_PRC",
         "value": value,
     }
+
+
+class FreshnessTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SP15_DB"] = str(Path(self.tmp.name) / "sp15.sqlite")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("SP15_DB", None)
+
+    def test_a_full_day_has_no_gaps(self):
+        _fill_day("2026-11-07", 24)
+        self.assertEqual(day_gaps(date(2026, 11, 7)), [])
+
+    def test_a_short_price_hour_is_reported(self):
+        _fill_day("2026-11-07", 24, lmp_hours=23)
+        gaps = day_gaps(date(2026, 11, 7))
+        self.assertEqual(len(gaps), 1)
+        self.assertIn("日前电价 23/24", gaps[0])
+
+    def test_may_source_hole_does_not_require_ties(self):
+        _fill_day("2026-05-01", 24, ties=False)
+        self.assertEqual(day_gaps(date(2026, 5, 1)), [])
+
+
+class WatchTests(unittest.TestCase):
+    def test_retries_until_the_day_is_complete(self):
+        shanghai = ZoneInfo("Asia/Shanghai")
+        state = {"n": 0, "now": datetime(2026, 11, 9, 1, 16, tzinfo=shanghai)}
+        notes: list[str] = []
+
+        def sync() -> None:
+            state["n"] += 1
+
+        def gaps(_day):
+            return ["没有联络线 ATC"] if state["n"] < 2 else []
+
+        def sleeper(seconds: float) -> None:
+            state["now"] = state["now"] + timedelta(seconds=seconds)
+
+        code = run_watch(
+            sync=sync,
+            gaps_for=gaps,
+            notify=notes.append,
+            clock=lambda: state["now"],
+            sleeper=sleeper,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(state["n"], 2)
+        self.assertIn("采集不全", notes[0])
+        self.assertIn("已补齐", notes[1])
+
+    def test_stops_at_the_deadline_when_still_short(self):
+        shanghai = ZoneInfo("Asia/Shanghai")
+        state = {"now": datetime(2026, 11, 9, 1, 50, tzinfo=shanghai)}
+        notes: list[str] = []
+
+        def sleeper(seconds: float) -> None:
+            state["now"] = state["now"] + timedelta(seconds=seconds)
+
+        code = run_watch(
+            pause_seconds=600,
+            sync=lambda: None,
+            gaps_for=lambda _day: ["没有日前电价"],
+            notify=notes.append,
+            clock=lambda: state["now"],
+            sleeper=sleeper,
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(any("仍未采全" in note for note in notes))
+
+
+def _fill_day(day: str, hours: int, *, lmp_hours: int | None = None, ties: bool = True) -> None:
+    lmp_hours = hours if lmp_hours is None else lmp_hours
+    conn = connect(write=True)
+    try:
+        lmp_rows = []
+        price_rows = []
+        requirement_rows = []
+        atc_rows = []
+        usage_rows = []
+        for hour in range(1, hours + 1):
+            start = f"{day}T{hour:02d}:00:00Z"
+            end = f"{day}T{hour:02d}:59:00Z"
+            if hour <= lmp_hours:
+                for node in node_ids():
+                    for kind in LMP_TYPES:
+                        lmp_rows.append(
+                            {
+                                "interval_start": start,
+                                "interval_end": end,
+                                "opr_dt": day,
+                                "opr_hr": hour,
+                                "node": node,
+                                "lmp_type": kind,
+                                "xml_data_item": f"{kind}_PRC",
+                                "value": 1.0,
+                            }
+                        )
+            for kind in AS_TYPES:
+                price_rows.append(
+                    {
+                        "interval_start": start,
+                        "interval_end": end,
+                        "opr_dt": day,
+                        "opr_hr": hour,
+                        "anc_type": kind,
+                        "anc_region": "AS_SP26",
+                        "xml_data_item": f"{kind}_CLR_PRC",
+                        "value": 1.0,
+                    }
+                )
+            for anc_type, item in AS_REQUIREMENTS:
+                requirement_rows.append(
+                    {
+                        "interval_start": start,
+                        "interval_end": end,
+                        "opr_dt": day,
+                        "opr_hr": hour,
+                        "anc_type": anc_type,
+                        "anc_region": "AS_SP26",
+                        "xml_data_item": item,
+                        "label": item,
+                        "value": 1.0,
+                    }
+                )
+            if ties:
+                for tie in tie_ids():
+                    for direction in TIE_DIRECTIONS:
+                        atc_rows.append(
+                            {
+                                "interval_start": start,
+                                "interval_end": end,
+                                "opr_dt": day,
+                                "opr_hr": hour,
+                                "ti_id": tie,
+                                "ti_direction": direction,
+                                "value": 1.0,
+                            }
+                        )
+                        usage_rows.append(
+                            {
+                                "interval_start": start,
+                                "interval_end": end,
+                                "opr_dt": day,
+                                "opr_hr": hour,
+                                "ti_id": tie,
+                                "ti_direction": direction,
+                            }
+                        )
+        with conn:
+            upsert(conn, "dam_lmp", lmp_rows)
+            upsert(conn, "as_price", price_rows)
+            upsert(conn, "as_requirement", requirement_rows)
+            upsert(conn, "tie_atc", atc_rows)
+            upsert(conn, "tie_usage", usage_rows)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

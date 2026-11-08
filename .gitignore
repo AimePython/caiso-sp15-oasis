@@ -13,4 +13,5 @@ data/*.sqlite
 data/*.sqlite-*
 data/*.csv
 data/*.log
+data/*.lock
 data/raw/

@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from datetime import time as clock_time
 
 from .calendar import RETENTION_FLOOR, parse_day, today_pt
 from .db import MissingDatabase, connect, upsert
 from .query import dataset_coverage, training_panel
 from .sync import SPEC_BY_NAME, sync_all
+from .watch import run_watch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--refresh", action="store_true", help="已完成的历史块也重新下载")
 
     sub.add_parser("status", help="看每张表覆盖了哪些运行日")
+
+    watch = sub.add_parser("watch", help="补采到本地时间 02:00，没采全就提醒")
+    watch.add_argument("--until", default="02:00", help="本地时间，过了这个点还没齐就停，并再提醒一次")
+    watch.add_argument("--pause", type=float, default=90.0, help="两次补采之间至少休息的秒数")
 
     export = sub.add_parser("export", help="把训练表导出成 CSV")
     export.add_argument("--start", required=True)
@@ -48,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "status":
         return _status()
+    if args.cmd == "watch":
+        hour, minute = args.until.split(":", 1)
+        return run_watch(until=clock_time(int(hour), int(minute)), pause_seconds=args.pause)
     if args.cmd == "export":
         return _export(args.start, args.end, args.out, args.ties)
     if args.cmd == "import-csv":

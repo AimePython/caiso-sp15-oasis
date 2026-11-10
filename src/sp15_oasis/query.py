@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 
@@ -11,6 +12,7 @@ from .db import TABLES, MissingDatabase, connect
 _NODE_BY_ID = {node.node_id: node for node in NODES}
 _HUB_TYPES = ("LMP", "MCC", "MCE", "MCL", "MGHG")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_\-]+")
+_SAFE_LABEL = re.compile(r"[A-Za-z0-9_ \-]+")
 _SAFE_TYPE = re.compile(r"[A-Z0-9_]+")
 
 
@@ -65,7 +67,7 @@ def query_dam_prices(
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT opr_dt, opr_hr,
+                SELECT opr_dt, MIN(issued_on) AS issued_on, opr_hr,
                        MIN(interval_start) AS interval_start_utc,
                        MIN(interval_end) AS interval_end_utc,
                        node, {columns}
@@ -86,7 +88,7 @@ def query_dam_prices(
             total = conn.execute(f"SELECT COUNT(*) FROM dam_lmp WHERE {where}", params).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT opr_dt, opr_hr, interval_start AS interval_start_utc,
+                SELECT issued_on, opr_dt, opr_hr, interval_start AS interval_start_utc,
                        interval_end AS interval_end_utc, node, lmp_type AS component, value AS usd_per_mwh
                 FROM dam_lmp
                 WHERE {where}
@@ -119,10 +121,13 @@ def query_ancillary(
     start_day, end_day = _days(start, end)
     limit, capped = _limit(limit)
     _offset(offset)
-    table = {"price": "as_price", "requirement": "as_requirement"}.get(kind)
+    table = {"price": "as_price", "requirement": "as_requirement", "result": "as_result"}.get(kind)
     if table is None:
-        raise ValueError("kind 要用 price 或 requirement")
-    unit = "USD/MW" if kind == "price" else "MW"
+        raise ValueError("kind 要用 price、requirement 或 result")
+    unit = {"price": "USD/MW", "requirement": "MW", "result": "MW；UOM 为 2 时 value 是美元成本"}[kind]
+    columns = "opr_dt, opr_hr, interval_start AS interval_start_utc, anc_type, anc_region, xml_data_item, value"
+    if kind == "result":
+        columns += ", result_type, uom"
     where = "anc_region = 'AS_SP26' AND opr_dt >= ? AND opr_dt <= ?"
     params: list = [start_day, end_day]
     if anc_type:
@@ -135,8 +140,7 @@ def query_ancillary(
         total = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0]
         rows = conn.execute(
             f"""
-            SELECT opr_dt, opr_hr, interval_start AS interval_start_utc,
-                   anc_type, anc_region, xml_data_item, value
+            SELECT {columns}
             FROM {table}
             WHERE {where}
             ORDER BY opr_dt, opr_hr, anc_type, xml_data_item
@@ -155,6 +159,207 @@ def query_ancillary(
         )
     finally:
         conn.close()
+
+
+def query_load(
+    start: str,
+    end: str,
+    market: str = "DAM",
+    tac_area: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """Hourly load forecast or actual demand, in MW."""
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    market = market.upper()
+    if market == "PEAK":
+        return _query_rows(
+            "load_peak",
+            "opr_dt, opr_hr, interval_start AS interval_start_utc, tac_area, value",
+            start_day,
+            end_day,
+            limit,
+            offset,
+            capped,
+            extra_filters=[("tac_area", tac_area)],
+            unit="MW",
+            market="PEAK",
+        )
+    if market not in {"DAM", "2DA", "7DA", "ACTUAL", "ALL"}:
+        raise ValueError("market 要用 DAM、2DA、7DA、ACTUAL、PEAK 或 ALL")
+    filters = [] if market == "ALL" else [("market_run_id", market)]
+    filters.append(("tac_area", tac_area))
+    return _query_rows(
+        "load",
+        "opr_dt, opr_hr, interval_start AS interval_start_utc, market_run_id, tac_area, xml_data_item, label, value",
+        start_day,
+        end_day,
+        limit,
+        offset,
+        capped,
+        extra_filters=filters,
+        unit="MW",
+        market=market,
+    )
+
+
+def query_renewables(
+    start: str,
+    end: str,
+    market: str = "ACTUAL",
+    trading_hub: str = "SP15",
+    renewable_type: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """Wind and solar forecast or actual generation. SUMMARY is the ISO-wide hourly total."""
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    market = market.upper()
+    if market == "SUMMARY":
+        return _query_rows(
+            "wind_solar_summary",
+            "opr_dt, opr_hr, interval_start AS interval_start_utc, market_run_id, data_item, value",
+            start_day,
+            end_day,
+            limit,
+            offset,
+            capped,
+            extra_filters=[],
+            unit="MW",
+            market="SUMMARY",
+        )
+    if market not in {"DAM", "ACTUAL", "ALL"}:
+        raise ValueError("market 要用 DAM、ACTUAL、SUMMARY 或 ALL")
+    filters = [] if market == "ALL" else [("market_run_id", market)]
+    filters.append(("trading_hub", trading_hub))
+    filters.append(("renewable_type", renewable_type))
+    return _query_rows(
+        "renewable",
+        "opr_dt, opr_hr, interval_start AS interval_start_utc, market_run_id, trading_hub, renewable_type, value",
+        start_day,
+        end_day,
+        limit,
+        offset,
+        capped,
+        extra_filters=filters,
+        unit="MW",
+        market=market,
+    )
+
+
+def query_fuel(
+    start: str,
+    end: str,
+    fuel_region_id: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    return _query_rows(
+        "fuel_price",
+        "opr_dt, opr_hr, interval_start AS interval_start_utc, fuel_region_id, value",
+        start_day,
+        end_day,
+        limit,
+        offset,
+        capped,
+        extra_filters=[("fuel_region_id", fuel_region_id)],
+        unit="USD/mmBtu",
+    )
+
+
+def query_ghg(start: str, end: str, limit: int = 200, offset: int = 0) -> dict:
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    return _query_rows(
+        "ghg_allowance",
+        "opr_dt, interval_start AS interval_start_utc, interval_end AS interval_end_utc, value",
+        start_day,
+        end_day,
+        limit,
+        offset,
+        capped,
+        extra_filters=[],
+        unit="USD/tCO2",
+    )
+
+
+def query_system_schedule(
+    start: str,
+    end: str,
+    tac_zone: str = "TAC_SOUTH",
+    schedule: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    return _query_rows(
+        "system_schedule",
+        "opr_dt, opr_hr, interval_start AS interval_start_utc, tac_zone, schedule, xml_data_item, value",
+        start_day,
+        end_day,
+        limit,
+        offset,
+        capped,
+        extra_filters=[("tac_zone", tac_zone), ("schedule", schedule)],
+        unit="MW",
+        market="DAM",
+    )
+
+
+def _query_rows(
+    table: str,
+    columns: str,
+    start_day: str,
+    end_day: str,
+    limit: int,
+    offset: int,
+    capped: bool,
+    *,
+    extra_filters: list[tuple[str, str]],
+    unit: str,
+    **meta,
+) -> dict:
+    where = ["opr_dt >= ?", "opr_dt <= ?"]
+    params: list = [start_day, end_day]
+    for column, value in extra_filters:
+        if not value or value.upper() == "ALL":
+            continue
+        if not _SAFE_LABEL.fullmatch(value):
+            raise ValueError(f"不能识别的筛选值 {value}")
+        where.append(f"{column} = ?")
+        params.append(value)
+    clause = " AND ".join(where)
+    order = "opr_dt, opr_hr" if "opr_hr" in columns else "opr_dt"
+    conn = connect()
+    try:
+        _require_table(conn, table)
+        total = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {clause}", params).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT issued_on, {columns} FROM {table} WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        return _page(rows, total=total, limit=limit, offset=offset, capped=capped, unit=unit, **meta)
+    finally:
+        conn.close()
+
+
+def _require_table(conn: sqlite3.Connection, table: str) -> None:
+    found = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if found is None:
+        raise ValueError(f"还没有 {table}。先运行 sync，把这张新表补进本地库。")
 
 
 def query_tie_atc(
@@ -227,7 +432,7 @@ def query_shadow_prices(
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT opr_dt, opr_hr, interval_start AS interval_start_utc,
+                SELECT issued_on, opr_dt, opr_hr, interval_start AS interval_start_utc,
                        nomogram_id, constraint_cause, value AS usd_per_mwh, region_tag
                 FROM nomogram_shadow
                 WHERE {where}
@@ -251,7 +456,7 @@ def query_shadow_prices(
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT opr_dt, opr_hr, interval_start AS interval_start_utc,
+                SELECT issued_on, opr_dt, opr_hr, interval_start AS interval_start_utc,
                        ti_id, ti_direction, constraint_cause, value AS usd_per_mwh, sp15_related
                 FROM intertie_shadow
                 WHERE {where}
@@ -298,7 +503,7 @@ def training_panel(
         ).fetchone()[0]
         spine = conn.execute(
             """
-            SELECT opr_dt, opr_hr, interval_start, interval_end
+            SELECT issued_on, opr_dt, opr_hr, interval_start, interval_end
             FROM dam_lmp
             WHERE node = ? AND lmp_type = 'LMP' AND opr_dt >= ? AND opr_dt <= ?
             ORDER BY opr_dt, opr_hr
@@ -365,6 +570,7 @@ def training_panel(
             key = (hour["opr_dt"], hour["opr_hr"])
             row: dict = {
                 "opr_dt": hour["opr_dt"],
+                "issued_on": hour["issued_on"],
                 "opr_hr": hour["opr_hr"],
                 "interval_start_utc": hour["interval_start"],
                 "interval_end_utc": hour["interval_end"],
@@ -434,29 +640,98 @@ def query_sql(sql: str, limit: int = 200) -> dict:
 def _coverage(conn: sqlite3.Connection) -> dict:
     tables = {
         "dam_lmp_sp15_hub": (
+            "dam_lmp",
             "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) "
             "FROM dam_lmp WHERE node = ? AND lmp_type = 'LMP'",
             (HUB,),
         ),
-        "dam_lmp_rows": ("SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM dam_lmp", ()),
-        "as_price": ("SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM as_price", ()),
+        "dam_lmp_rows": (
+            "dam_lmp",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM dam_lmp",
+            (),
+        ),
+        "as_price": (
+            "as_price",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM as_price",
+            (),
+        ),
         "as_requirement": (
+            "as_requirement",
             "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM as_requirement",
             (),
         ),
-        "tie_atc": ("SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM tie_atc", ()),
-        "tie_usage": ("SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM tie_usage", ()),
+        "tie_atc": (
+            "tie_atc",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM tie_atc",
+            (),
+        ),
+        "tie_usage": (
+            "tie_usage",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM tie_usage",
+            (),
+        ),
         "intertie_shadow": (
+            "intertie_shadow",
             "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM intertie_shadow",
             (),
         ),
         "nomogram_shadow": (
+            "nomogram_shadow",
             "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM nomogram_shadow",
             (),
         ),
+        "load": (
+            "load",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM load",
+            (),
+        ),
+        "load_peak": (
+            "load_peak",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM load_peak",
+            (),
+        ),
+        "renewable": (
+            "renewable",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM renewable",
+            (),
+        ),
+        "wind_solar_summary": (
+            "wind_solar_summary",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM wind_solar_summary",
+            (),
+        ),
+        "fuel_price": (
+            "fuel_price",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM fuel_price",
+            (),
+        ),
+        "ghg_allowance": (
+            "ghg_allowance",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM ghg_allowance",
+            (),
+        ),
+        "as_result": (
+            "as_result",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM as_result",
+            (),
+        ),
+        "system_schedule": (
+            "system_schedule",
+            "SELECT COUNT(*), MIN(opr_dt), MAX(opr_dt), COUNT(DISTINCT opr_dt) FROM system_schedule",
+            (),
+        ),
     }
+    present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     coverage = {}
-    for name, (sql, params) in tables.items():
+    for name, (table, sql, params) in tables.items():
+        if table not in present:
+            coverage[name] = {
+                "rows": 0,
+                "first_operating_day": None,
+                "last_operating_day": None,
+                "distinct_days": 0,
+            }
+            continue
         count, first, last, days = conn.execute(sql, params).fetchone()
         coverage[name] = {
             "rows": count,
@@ -606,7 +881,7 @@ def _query_ties(table, start, end, ti_id, direction, limit, offset, columns, uni
         total = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0]
         rows = conn.execute(
             f"""
-            SELECT opr_dt, opr_hr, interval_start AS interval_start_utc,
+            SELECT issued_on, opr_dt, opr_hr, interval_start AS interval_start_utc,
                    ti_id, ti_direction, {columns}
             FROM {table}
             WHERE {where}
@@ -705,6 +980,69 @@ def _guard_sql(sql: str) -> str:
     ):
         raise ValueError("只允许只读 SELECT")
     return statement
+
+
+def query_report(
+    report: str,
+    start: str,
+    end: str,
+    forecast_date: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """Rows from the long-tail disclosure table.
+
+    ``forecast_date`` filters 预测日期. Leave it empty to return every vintage
+    whose operating day falls in the range.
+    """
+    if not _SAFE_LABEL.fullmatch(report):
+        raise ValueError(f"不能识别的报表 {report}")
+    start_day, end_day = _days(start, end)
+    limit, capped = _limit(limit)
+    _offset(offset)
+    where = "report = ? AND opr_dt >= ? AND opr_dt <= ?"
+    params: list = [report, start_day, end_day]
+    if forecast_date:
+        if not _SAFE_LABEL.fullmatch(forecast_date):
+            raise ValueError("预测日期要用 YYYY-MM-DD")
+        where += " AND issued_on = ?"
+        params.append(forecast_date)
+    conn = connect()
+    try:
+        _require_table(conn, "disclosure")
+        total = conn.execute(f"SELECT COUNT(*) FROM disclosure WHERE {where}", params).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT report, issued_on, opr_dt, opr_hr,
+                   interval_start AS interval_start_utc,
+                   interval_end AS interval_end_utc,
+                   market_run_id, value, attributes
+            FROM disclosure
+            WHERE {where}
+            ORDER BY opr_dt, opr_hr, interval_start
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+        parsed = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["attributes"] = json.loads(item["attributes"])
+            except (TypeError, json.JSONDecodeError):
+                pass
+            parsed.append(item)
+        return _page(
+            parsed,
+            total=total,
+            limit=limit,
+            offset=offset,
+            capped=capped,
+            unit="见 attributes 里的单位",
+            issued_on_means="预测日期。实测等于标的运行日。DAM 是标的日前一天，2DA 前两天，7DA 前七天。",
+        )
+    finally:
+        conn.close()
 
 
 def _meta(**extra) -> dict:

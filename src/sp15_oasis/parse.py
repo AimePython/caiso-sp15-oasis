@@ -180,3 +180,127 @@ def normalize_nomogram(rows: list[dict]) -> list[dict]:
             }
         )
     return [row for row in out if row["interval_start"] and row["nomogram_id"]]
+
+
+def _hour(row: dict) -> dict:
+    return {
+        "interval_start": _cell(row, "INTERVALSTARTTIME_GMT"),
+        "interval_end": _cell(row, "INTERVALENDTIME_GMT"),
+        "opr_dt": _cell(row, "OPR_DT"),
+        "opr_hr": int(_cell(row, "OPR_HR") or 0),
+    }
+
+
+def normalize_load(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "market_run_id": _cell(row, "MARKET_RUN_ID"),
+            "tac_area": _cell(row, "TAC_AREA_NAME"),
+            "xml_data_item": _cell(row, "XML_DATA_ITEM"),
+            "label": _cell(row, "LABEL"),
+            "value": num(row.get("MW")),
+        }
+        if item["interval_start"] and item["tac_area"] and item["xml_data_item"]:
+            out.append(item)
+    return out
+
+
+def normalize_load_peak(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {**_hour(row), "tac_area": _cell(row, "TAC_AREA_NAME"), "value": num(row.get("LOAD_MW"))}
+        if item["interval_start"] and item["tac_area"]:
+            out.append(item)
+    return out
+
+
+def normalize_renewable(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "market_run_id": _cell(row, "MARKET_RUN_ID"),
+            "trading_hub": _cell(row, "TRADING_HUB"),
+            "renewable_type": _cell(row, "RENEWABLE_TYPE"),
+            "xml_data_item": _cell(row, "XML_DATA_ITEM"),
+            "value": num(row.get("MW")),
+        }
+        if item["interval_start"] and item["trading_hub"] and item["renewable_type"]:
+            out.append(item)
+    return out
+
+
+def normalize_wind_solar_summary(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "market_run_id": _cell(row, "MARKET_RUN_ID"),
+            "data_item": _cell(row, "DATA_ITEM"),
+            "value": num(row.get("VALUE")),
+        }
+        if item["interval_start"] and item["data_item"]:
+            out.append(item)
+    return out
+
+
+def normalize_fuel(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "fuel_region_id": _cell(row, "FUEL_REGION_ID"),
+            "value": num(row.get("PRC")),
+        }
+        if item["interval_start"] and item["fuel_region_id"]:
+            out.append(item)
+    return out
+
+
+def normalize_ghg(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            "interval_start": _cell(row, "INTERVALSTARTTIME_GMT"),
+            "interval_end": _cell(row, "INTERVALENDTIME_GMT"),
+            "opr_dt": _cell(row, "OPR_DT"),
+            "value": num(row.get("GHG_PRC_IDX")),
+        }
+        if item["opr_dt"]:
+            out.append(item)
+    return out
+
+
+def normalize_as_result(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "anc_type": _cell(row, "ANC_TYPE"),
+            "anc_region": _cell(row, "ANC_REGION"),
+            "result_type": _cell(row, "RESULT_TYPE"),
+            "xml_data_item": _cell(row, "XML_DATA_ITEM"),
+            "uom": _cell(row, "UOM"),
+            "value": num(row.get("MW")),
+        }
+        if item["interval_start"] and item["anc_type"] and item["xml_data_item"]:
+            out.append(item)
+    return out
+
+
+def normalize_system_schedule(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = {
+            **_hour(row),
+            "market_run_id": _cell(row, "MARKET_RUN_ID"),
+            "tac_zone": _cell(row, "TAC_ZONE_NAME"),
+            "schedule": _cell(row, "SCHEDULE"),
+            "xml_data_item": _cell(row, "XML_DATA_ITEM"),
+            "value": num(row.get("MW")),
+        }
+        if item["interval_start"] and item["tac_zone"] and item["xml_data_item"]:
+            out.append(item)
+    return out

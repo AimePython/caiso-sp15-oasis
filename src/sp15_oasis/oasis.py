@@ -10,7 +10,8 @@ from urllib.parse import urlencode
 
 import requests
 
-API = "https://oasis.caiso.com/oasisapi/SingleZip"
+BASE = "https://oasis.caiso.com/oasisapi/"
+API = BASE + "SingleZip"
 USER_AGENT = "caiso-sp15-oasis/0.1 (research; github.com/AimePython/caiso-sp15-oasis)"
 
 
@@ -25,12 +26,13 @@ class OasisClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_csv(self, params: dict[str, str]) -> list[dict] | None:
+    def fetch_csv(self, params: dict[str, str], path: str = "SingleZip") -> list[dict] | None:
         """Return CSV rows, or None when OASIS sends an XML 'no data' zip."""
         last_error: Exception | None = None
+        label = params.get("queryname") or params.get("groupid")
         for attempt in range(6):
             self._pace()
-            url = API + "?" + urlencode(params, safe=",")
+            url = BASE + path + "?" + urlencode(params, safe=",")
             try:
                 response = self.session.get(url, timeout=180)
             except requests.RequestException as exc:
@@ -45,15 +47,12 @@ class OasisClient:
                 continue
             if response.status_code != 200:
                 last_error = OasisError(
-                    f"HTTP {response.status_code} for {params.get('queryname')} "
-                    f"{params.get('startdatetime')}"
+                    f"HTTP {response.status_code} for {label} {params.get('startdatetime')}"
                 )
                 time.sleep(10)
                 continue
             if response.content[:2] != b"PK":
-                last_error = OasisError(
-                    f"not a zip for {params.get('queryname')}: {response.content[:180]!r}"
-                )
+                last_error = OasisError(f"not a zip for {label}: {response.content[:180]!r}")
                 time.sleep(10)
                 continue
             try:

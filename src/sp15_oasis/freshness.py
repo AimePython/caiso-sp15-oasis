@@ -75,9 +75,45 @@ def day_gaps(day: date) -> list[str]:
             )
             gaps.extend(_series_gap("联络线 ATC", _counts(conn, tie_sql.format(table="tie_atc"), day), tie_keys, hours))
             gaps.extend(_series_gap("断面使用", _counts(conn, tie_sql.format(table="tie_usage"), day), tie_keys, hours))
+        if _table_exists(conn, "load"):
+            gaps.extend(
+                _series_gap(
+                    "日前负荷",
+                    _counts(
+                        conn,
+                        "SELECT tac_area, xml_data_item, COUNT(DISTINCT interval_start) "
+                        "FROM load WHERE opr_dt = ? AND market_run_id = 'DAM' GROUP BY 1, 2",
+                        day,
+                    ),
+                    [("CA ISO-TAC", "SYS_FCST_DA_MW"), ("SCE-TAC", "SYS_FCST_DA_MW"), ("SDGE-TAC", "SYS_FCST_DA_MW")],
+                    hours,
+                )
+            )
+        if _table_exists(conn, "renewable"):
+            gaps.extend(
+                _series_gap(
+                    "日前风光预测",
+                    _counts(
+                        conn,
+                        "SELECT trading_hub, renewable_type, COUNT(DISTINCT interval_start) "
+                        "FROM renewable WHERE opr_dt = ? AND market_run_id = 'DAM' GROUP BY 1, 2",
+                        day,
+                    ),
+                    [("SP15", "Solar"), ("SP15", "Wind")],
+                    hours,
+                )
+            )
         return [gap for gap in gaps if gap]
     finally:
         conn.close()
+
+
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
 
 
 def _in_atc_hole(day: date) -> bool:

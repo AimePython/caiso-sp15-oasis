@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sp15_oasis.calendar import expected_hours, floor_chunk, iter_chunks, trading_bounds
+from sp15_oasis.calendar import expected_hours, floor_chunk, issued_on, iter_chunks, today_pt, trading_bounds
 from sp15_oasis.catalog import HUB, classify_nomogram, node_ids, tie_ids
 from sp15_oasis.db import connect, upsert
 from sp15_oasis.freshness import AS_REQUIREMENTS, AS_TYPES, LMP_TYPES, TIE_DIRECTIONS, day_gaps
@@ -41,6 +41,22 @@ class CalendarTests(unittest.TestCase):
         self.assertEqual(
             trading_bounds(date(2026, 11, 1), date(2026, 11, 2)),
             ("20261101T07:00-0000", "20261102T08:00-0000"),
+        )
+
+    def test_forecast_date_is_not_the_operating_day(self):
+        day = date(2026, 10, 10)
+        self.assertEqual(issued_on(day, "DAM"), date(2026, 10, 9))
+        self.assertEqual(issued_on(day, "2DA"), date(2026, 10, 8))
+        self.assertEqual(issued_on(day, "7DA"), date(2026, 10, 3))
+        self.assertEqual(issued_on(day, "ACTUAL"), date(2026, 10, 10))
+        # Midnight Pacific (PDT, UTC-7) minus 75 minutes is still Oct 9.
+        self.assertEqual(
+            issued_on(day, "HASP", "2026-10-10T07:00:00-00:00"),
+            date(2026, 10, 9),
+        )
+        self.assertEqual(
+            issued_on(day, "RTD", "2026-10-10T08:00:00-00:00"),
+            date(2026, 10, 10),
         )
 
     def test_expected_hours_follow_pacific_daylight_time(self):
@@ -214,6 +230,7 @@ class DatabaseTests(unittest.TestCase):
         page = training_panel("2026-11-07", "2026-11-07", ties="PALOVRDE_ITC", limit=10)
         self.assertEqual(page["meta"]["rows_total"], 1)
         row = page["rows"][0]
+        self.assertEqual(row["issued_on"], "2026-11-06")
         self.assertEqual(row["sp15_lmp"], 40.0)
         self.assertEqual(row["sp15_mcc"], 5.0)
         self.assertEqual(row["sce_lmp"], 41.0)
@@ -276,7 +293,7 @@ class WatchTests(unittest.TestCase):
     def test_retries_until_the_day_is_complete(self):
         shanghai = ZoneInfo("Asia/Shanghai")
         state = {"n": 0, "now": datetime(2026, 11, 9, 1, 16, tzinfo=shanghai)}
-        notes: list[str] = []
+        notes: list[tuple[str, str]] = []
 
         def sync() -> None:
             state["n"] += 1
@@ -290,19 +307,21 @@ class WatchTests(unittest.TestCase):
         code = run_watch(
             sync=sync,
             gaps_for=gaps,
-            notify=notes.append,
+            notify=lambda kind, message: notes.append((kind, message)),
             clock=lambda: state["now"],
             sleeper=sleeper,
         )
         self.assertEqual(code, 0)
         self.assertEqual(state["n"], 2)
-        self.assertIn("采集不全", notes[0])
-        self.assertIn("已补齐", notes[1])
+        self.assertEqual(notes[0][0], "缺数")
+        self.assertIn("采集不全", notes[0][1])
+        self.assertEqual(notes[1][0], "入库")
+        self.assertIn("已补齐入库", notes[1][1])
 
     def test_stops_at_the_deadline_when_still_short(self):
         shanghai = ZoneInfo("Asia/Shanghai")
         state = {"now": datetime(2026, 11, 9, 1, 50, tzinfo=shanghai)}
-        notes: list[str] = []
+        notes: list[tuple[str, str]] = []
 
         def sleeper(seconds: float) -> None:
             state["now"] = state["now"] + timedelta(seconds=seconds)
@@ -311,12 +330,29 @@ class WatchTests(unittest.TestCase):
             pause_seconds=600,
             sync=lambda: None,
             gaps_for=lambda _day: ["没有日前电价"],
-            notify=notes.append,
+            notify=lambda kind, message: notes.append((kind, message)),
             clock=lambda: state["now"],
             sleeper=sleeper,
         )
         self.assertEqual(code, 1)
-        self.assertTrue(any("仍未采全" in note for note in notes))
+        self.assertTrue(all(kind == "缺数" for kind, _message in notes))
+        self.assertTrue(any("仍未采全" in message for _kind, message in notes))
+
+    def test_complete_sync_sends_an_ingest_notice(self):
+        notes: list[tuple[str, str]] = []
+        code = run_watch(
+            sync=lambda: None,
+            gaps_for=lambda _day: [],
+            notify=lambda kind, message: notes.append((kind, message)),
+            clock=lambda: datetime(2026, 11, 10, 1, 16, tzinfo=ZoneInfo("Asia/Shanghai")),
+            sleeper=lambda _seconds: None,
+        )
+        self.assertEqual(code, 0)
+        day = today_pt()
+        self.assertEqual(
+            notes,
+            [("入库", f"运行日 {day.isoformat()} 已入库，{expected_hours(day)} 小时齐全。")],
+        )
 
 
 def _fill_day(day: str, hours: int, *, lmp_hours: int | None = None, ties: bool = True) -> None:
@@ -328,6 +364,8 @@ def _fill_day(day: str, hours: int, *, lmp_hours: int | None = None, ties: bool 
         requirement_rows = []
         atc_rows = []
         usage_rows = []
+        load_rows = []
+        renewable_rows = []
         for hour in range(1, hours + 1):
             start = f"{day}T{hour:02d}:00:00Z"
             end = f"{day}T{hour:02d}:59:00Z"
@@ -397,12 +435,42 @@ def _fill_day(day: str, hours: int, *, lmp_hours: int | None = None, ties: bool 
                                 "ti_direction": direction,
                             }
                         )
+            for area in ("CA ISO-TAC", "SCE-TAC", "SDGE-TAC"):
+                load_rows.append(
+                    {
+                        "interval_start": start,
+                        "interval_end": end,
+                        "opr_dt": day,
+                        "opr_hr": hour,
+                        "market_run_id": "DAM",
+                        "tac_area": area,
+                        "xml_data_item": "SYS_FCST_DA_MW",
+                        "label": "Demand Forecast Day Ahead",
+                        "value": 1.0,
+                    }
+                )
+            for kind in ("Solar", "Wind"):
+                renewable_rows.append(
+                    {
+                        "interval_start": start,
+                        "interval_end": end,
+                        "opr_dt": day,
+                        "opr_hr": hour,
+                        "market_run_id": "DAM",
+                        "trading_hub": "SP15",
+                        "renewable_type": kind,
+                        "xml_data_item": "RENEW_FCST_DA_MW",
+                        "value": 1.0,
+                    }
+                )
         with conn:
             upsert(conn, "dam_lmp", lmp_rows)
             upsert(conn, "as_price", price_rows)
             upsert(conn, "as_requirement", requirement_rows)
             upsert(conn, "tie_atc", atc_rows)
             upsert(conn, "tie_usage", usage_rows)
+            upsert(conn, "load", load_rows)
+            upsert(conn, "renewable", renewable_rows)
     finally:
         conn.close()
 

@@ -1,6 +1,6 @@
 # CAISO SP15 OASIS MCP
 
-把 [CAISO OASIS](https://www.caiso.com/systems-applications/portals-applications/open-access-same-time-information-system-oasis) 上和 SP15 有关的日前电价、南部边界、影子价格下到本地 SQLite，再用 MCP 查询。给同组的人训练模型用。数据是 CAISO 的公开披露，这个仓库只提供下载和查询。
+把 [CAISO OASIS](https://www.caiso.com/systems-applications/portals-applications/open-access-same-time-information-system-oasis) 上和 SP15 有关的日前电价、南部边界、影子价格、负荷、风光、燃料、碳价和系统计划下到本地 SQLite，再用 MCP 查询。其余实时/HASP 报表进 `disclosure`。气象是另一份 Open-Meteo 库。给同组的人训练模型用。数据是公开披露，这个仓库只提供下载和查询。
 
 在线接口大约只保留 **39 个月**。默认从 `2023-08-01` 同步到太平洋时区的今天。2016 年以后、超出 39 个月的电价在 [Historical OASIS Data Downloader](https://oasis-bulk.caiso.com/)，要自己的 AWS 账号，下载流量由下载方付。本工具不会去连那个桶。
 
@@ -63,7 +63,7 @@ python3 -m venv .venv
 
 从零安装、同步和接到 Cursor 见 [MCP使用指南](MCP使用指南.md)。字段中文名、OASIS 原名和单位见 [数据指标对照表](数据指标对照表.md)。
 
-每天 01:15（这台电脑的本地时间）自动补当天已经发布的数据。没采全会在这台 Mac 上弹通知，并持续补到 02:00：
+每天 01:15（这台电脑的本地时间）自动补当天已经发布的数据。入库成功和缺数都会在这台 Mac 上弹通知；缺了会持续补到 02:00：
 
 ```bash
 ./scripts/install-daily-sync.sh
@@ -74,14 +74,24 @@ python3 -m venv .venv
 - `list_catalog`：节点、联络线、单位、库里有多少天
 - `dataset_coverage`：每张表的起止运行日和同步进度
 - `query_dam_prices`：日前电价，美元/MWh
-- `query_ancillary`：AS_SP26 日前价格（美元/MW）或需求（MW）
+- `query_ancillary`：AS_SP26 日前价格（美元/MW）、需求或采购结果（MW）
+- `query_load`：小时负荷预测、实际负荷、日峰预测，MW
+- `query_renewables`：风光日前预测、实际出力，以及全网合计，MW
+- `query_fuel`：燃料区燃气价格，美元/mmBtu
+- `query_ghg`：加州碳配额价格指数
+- `query_system_schedule`：日前系统发用电计划，南部区是 `TAC_SOUTH`
+- `query_report`：`disclosure` 里的其余报表。`report` 用对照表里的名字，例如 `lmp_rtm_5min`、`load_rtpd`
+- `list_weather_datasets`、`query_weather_forecast`：Open-Meteo 的 GFS 点预报。不在 `data/sp15.sqlite`
 - `query_tie_atc`：南部联络线日前 ATC，MW
 - `query_tie_usage`：南部联络线日前 TTC、OTC、计划潮流、TRM
 - `query_shadow_prices`：日前支路/诺模图或联络线约束影子价格
-- `training_panel`：一小时一行的训练表
+- `training_panel`：事后同小时关联表，不是防泄漏预测训练集。预测训练用下面的 `research_*`
 - `query_sql`：一条只读 SELECT
+- `research_catalog`、`research_training`、`research_prediction_inputs`、`research_predictions`、`research_metrics`：冻结研究分区。读的是 `SP15_RESEARCH_ROOT` 指向的实验，不是这份 OASIS 档案
 
-日期都是运行日 `YYYY-MM-DD`，含首尾。`training_panel` 一次最多 5000 小时，用 `offset` 翻页。
+日期都是标的运行日 `YYYY-MM-DD`，含首尾。每一行还有 `issued_on`（预测日期）：标的日 10 月 10 日的日前数据是 10 月 9 日预测的，提前两天是 10 月 8 日，提前七天是 10 月 3 日。实测的预测日期等于标的日。`training_panel` 一次最多 5000 小时，用 `offset` 翻页。气象查询的 `end` 不含当天，和上面的电价日期不同。
+
+01:15 这一轮采全的标准：日前电价、AS 价格与需求、南部联络线、CAISO/SCE/SDG&E 日前负荷，以及 SP15 风电和光伏日前预测都有完整小时。实际负荷和实际风光要等运行日走完才齐，不拿来判断这一轮缺不缺。
 
 导出整段训练表：
 
@@ -97,7 +107,9 @@ python3 -m venv .venv
 
 ## 报表
 
-全部来自 `https://oasis.caiso.com/oasisapi/SingleZip`，市场都是 DAM。
+结构化表来自 `https://oasis.caiso.com/oasisapi/SingleZip`。电价和边界是 DAM。负荷和风光同时有预测和实际值。公开报价走 `GroupZip`。
+
+5 分钟和 15 分钟电价只保留 SP15 的 4 个节点。全机组的期望电量和调度指令没有整库接入。`disclosure` 的日常同步只刷新最近两个运行日；从 `2023-08-01` 补历史要加 `--archive`。结构化表字段、`disclosure` 的 `report` 名，以及气象变量和地点见 [数据指标对照表](数据指标对照表.md)。
 
 | 本地表 | OASIS 报表 | 内容 |
 | --- | --- | --- |
@@ -108,6 +120,17 @@ python3 -m venv .venv
 | `tie_usage` | `TRNS_USAGE` v1 | 南部联络线容量和计划潮流 |
 | `intertie_shadow` | `PRC_CNSTR` v1 | 联络线约束影子价格，南部打了 `sp15_related` |
 | `nomogram_shadow` | `PRC_NOMOGRAM` v1 | 支路和诺模图影子价格，带 `region_tag` |
+| `load` | `SLD_FCST` v1 | 日前、提前两天、提前七天负荷预测，以及实际小时负荷 |
+| `load_peak` | `SLD_FCST_PEAK` v1 | 各 TAC 区日峰负荷预测 |
+| `renewable` | `SLD_REN_FCST` v1 | 风光日前预测和实际出力，含 SP15 |
+| `wind_solar_summary` | `ENE_WIND_SOLAR_SUMMARY` v5 | 全网风光合计 |
+| `fuel_price` | `PRC_FUEL` v1 | 燃料区燃气价格 |
+| `ghg_allowance` | `PRC_GHG_ALLOWANCE` v1 | 加州碳配额价格指数 |
+| `as_result` | `AS_RESULTS` v1 | AS_SP26 日前采购结果 |
+| `system_schedule` | `ENE_SLRS` v1 | 日前系统负荷、发电、进出口 |
+| `disclosure` | 多个报表，见对照表 | 实时、HASP、全联络线、EIM、CRR、延迟报价、名录。用 `query_report` |
+
+气象是另一份库，默认 `/Users/jins/Documents/ChatGPT/比赛/mcp_service/runtime/caiso.sqlite`，可用 `SP15_WEATHER_DB` 换路径。变量是气温、10 米风速、短波辐照、云量和降水，7 个代表点。`watch` 会先拉一轮实时快照，再补 OASIS。
 
 如果以后从批量站点拿到同样表头的 CSV，可以叠进已有的库：
 

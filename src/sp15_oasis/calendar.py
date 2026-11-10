@@ -56,14 +56,61 @@ def floor_chunk(day: date) -> date:
     return RETENTION_FLOOR - timedelta(days=steps * CHUNK_DAYS)
 
 
-def iter_chunks(start: date, end_inclusive: date):
+def iter_chunks(start: date, end_inclusive: date, chunk_days: int = CHUNK_DAYS):
     """Yield half-open buckets that overlap the inclusive operating-day range."""
     if end_inclusive < start:
         return
-    cur = floor_chunk(start)
+    if chunk_days == CHUNK_DAYS:
+        cur = floor_chunk(start)
+        while cur <= end_inclusive:
+            yield cur, cur + timedelta(days=CHUNK_DAYS)
+            cur = cur + timedelta(days=CHUNK_DAYS)
+        return
+    cur = start
+    step = timedelta(days=chunk_days)
     while cur <= end_inclusive:
-        yield cur, cur + timedelta(days=CHUNK_DAYS)
-        cur = cur + timedelta(days=CHUNK_DAYS)
+        nxt = min(cur + step, end_inclusive + timedelta(days=1))
+        yield cur, nxt
+        cur = nxt
+
+
+# How many calendar days before the operating day the value was knowable.
+# DAM is the day-ahead publication (D-1). 2DA is D-2. 7DA is D-7.
+_DAY_LEAD = {"DAM": 1, "2DA": 2, "7DA": 7, "RUC": 1}
+# Real-time markets are issued inside the hour. The date is the Pacific date
+# of (interval start minus this many minutes), so the first interval of a day
+# can carry the previous calendar date.
+_MINUTE_LEAD = {"HASP": 75, "RTPD": 30, "RTD": 5, "RTM": 5}
+
+
+def issued_on(opr_dt: date, market: str, interval_start: str | None = None) -> date:
+    """Forecast date for a value that applies to operating day ``opr_dt``.
+
+    Actuals are not forecasts: the date is the operating day itself.
+    """
+    market = (market or "DAM").upper()
+    if market in _DAY_LEAD:
+        return opr_dt - timedelta(days=_DAY_LEAD[market])
+    if market == "ACTUAL":
+        return opr_dt
+    minutes = _MINUTE_LEAD.get(market)
+    moment = _parse_interval(interval_start) if minutes and interval_start else None
+    if moment is not None and minutes is not None:
+        return (moment - timedelta(minutes=minutes)).astimezone(PT).date()
+    return opr_dt
+
+
+def _parse_interval(value: str) -> datetime | None:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment
 
 
 def parse_day(value: str) -> date:

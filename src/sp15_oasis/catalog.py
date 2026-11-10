@@ -267,5 +267,105 @@ def catalog_payload() -> dict:
                 "what": "日前支路和诺模图影子价格。region_tag 为 sp15、path15 或 other。",
                 "unit": "USD/MWh",
             },
+            {
+                "name": "load_forecast_dam",
+                "report": "SLD_FCST v1",
+                "market": "DAM",
+                "what": "日前负荷预测，按 TAC 区，含 CA ISO-TAC、SCE-TAC、SDGE-TAC",
+                "unit": "MW",
+            },
+            {
+                "name": "load_forecast_2da",
+                "report": "SLD_FCST v1",
+                "market": "2DA",
+                "what": "提前两天的负荷预测",
+                "unit": "MW",
+            },
+            {
+                "name": "load_forecast_7da",
+                "report": "SLD_FCST v1",
+                "market": "7DA",
+                "what": "提前七天的负荷预测",
+                "unit": "MW",
+            },
+            {
+                "name": "load_actual",
+                "report": "SLD_FCST v1",
+                "market": "ACTUAL",
+                "what": "实际小时负荷",
+                "unit": "MW",
+            },
+            {
+                "name": "load_peak",
+                "report": "SLD_FCST_PEAK v1",
+                "market": "DAM",
+                "what": "各 TAC 区的日峰负荷预测",
+                "unit": "MW",
+            },
+            {
+                "name": "renewable_forecast",
+                "report": "SLD_REN_FCST v1",
+                "market": "DAM",
+                "what": "日前风电和光伏预测。SP15 是南部枢纽，接口也会带回 NP15、ZP26",
+                "unit": "MW",
+            },
+            {
+                "name": "renewable_actual",
+                "report": "SLD_REN_FCST v1",
+                "market": "ACTUAL",
+                "what": "风电和光伏实际出力",
+                "unit": "MW",
+            },
+            {
+                "name": "wind_solar_summary",
+                "report": "ENE_WIND_SOLAR_SUMMARY v5",
+                "market": "DAM and RTD",
+                "what": "全网风光合计：日前预测、日前计划、日前净虚拟、实时计划",
+                "unit": "MW",
+            },
+            {
+                "name": "fuel_price",
+                "report": "PRC_FUEL v1",
+                "market": "daily index",
+                "what": "各燃料区燃气价格",
+                "unit": "USD/mmBtu",
+            },
+            {
+                "name": "ghg_allowance",
+                "report": "PRC_GHG_ALLOWANCE v1",
+                "market": "daily index",
+                "what": "加州碳配额价格指数",
+                "unit": "USD/tCO2",
+            },
+            {
+                "name": "as_result",
+                "report": "AS_RESULTS v1",
+                "market": "DAM",
+                "what": "AS_SP26 日前辅助服务采购量、自提供量和成本",
+                "unit": "MW 或 USD",
+            },
+            {
+                "name": "system_schedule",
+                "report": "ENE_SLRS v1",
+                "market": "DAM",
+                "what": "日前系统负荷、发电、进口、出口。TAC_SOUTH 是南部区",
+                "unit": "MW",
+            },
+            {
+                "name": "disclosure",
+                "report": "其余 OASIS 报表，用 report 列区分",
+                "market": "见 issued_on",
+                "what": (
+                    "实时和 HASP 负荷、风光、辅助服务、断面，SP15 四个节点的 5 分钟和 15 分钟电价，"
+                    "全联络线潮流、EIM、灵活爬坡、CRR、公开报价和名录。"
+                    "issued_on 是预测日期，opr_dt 是标的运行日。"
+                ),
+                "unit": "见 attributes",
+            },
         ],
+        "not_in_this_archive": (
+            "5 分钟和 15 分钟电价只保留 SP15 的 4 个节点，没有全网每个节点。"
+            "全机组的期望电量和调度指令没有按节点过滤的接口，没有整库接入。"
+            "名录类报表如果必须逐个资源 ID 才能查，也不在这个库里。"
+        ),
     }

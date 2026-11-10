@@ -9,11 +9,11 @@ from collections.abc import Callable
 from datetime import datetime, time as clock_time
 from pathlib import Path
 
-from .calendar import today_pt
+from .calendar import expected_hours, today_pt
 from .freshness import day_gaps
 from .sync import log, sync_all
 
-Notify = Callable[[str], None]
+Notify = Callable[[str, str], None]
 Sleep = Callable[[float], None]
 Clock = Callable[[], datetime]
 
@@ -49,36 +49,43 @@ def run_watch(
                 missing = list(gaps_for(today_pt()))
             except Exception as exc:
                 missing = [f"同步失败：{exc}"]
-            day = today_pt().isoformat()
+            day = today_pt()
+            day_text = day.isoformat()
             if not missing:
+                hours = expected_hours(day)
                 if alerted:
-                    notify(f"运行日 {day} 已补齐。")
-                log(f"运行日 {day} 已齐。")
+                    notify("入库", f"运行日 {day_text} 已补齐入库，{hours} 小时齐全。")
+                else:
+                    notify("入库", f"运行日 {day_text} 已入库，{hours} 小时齐全。")
                 return 0
             summary = "；".join(missing)
             if moment >= deadline:
-                notify(f"运行日 {day} 到 {until.strftime('%H:%M')} 仍未采全：{summary}")
+                notify("缺数", f"运行日 {day_text} 到 {until.strftime('%H:%M')} 仍未采全：{summary}")
                 return 1
             if not alerted:
-                notify(f"运行日 {day} 采集不全：{summary}。{until.strftime('%H:%M')} 前会继续补采。")
+                notify(
+                    "缺数",
+                    f"运行日 {day_text} 采集不全：{summary}。{until.strftime('%H:%M')} 前会继续补采。",
+                )
                 alerted = True
             else:
-                log(f"运行日 {day} 仍不全：{summary}")
+                log(f"运行日 {day_text} 仍不全：{summary}")
             remaining = (deadline - moment).total_seconds()
             sleeper(min(pause_seconds, max(remaining, 0)))
     finally:
         lock.close()
 
 
-def mac_notify(message: str) -> None:
-    log(message)
+def mac_notify(kind: str, message: str) -> None:
+    title = f"CAISO SP15 {kind}"
+    log(f"{title}：{message}")
     script = (
         "on run argv\n"
         "display notification (item 2 of argv) with title (item 1 of argv)\n"
         "end run"
     )
     subprocess.run(
-        ["/usr/bin/osascript", "-e", script, "CAISO SP15", message],
+        ["/usr/bin/osascript", "-e", script, title, message],
         check=False,
     )
 

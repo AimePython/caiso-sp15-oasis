@@ -24,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--dataset", action="append", dest="datasets", help="只同步这一张，可重复")
     sync.add_argument("--sleep", type=float, default=7.0, help="两次请求之间至少休息的秒数")
     sync.add_argument("--refresh", action="store_true", help="已完成的历史块也重新下载")
+    sync.add_argument("--archive", action="store_true", help="其余报表从起始日补历史，而不只补最近几天")
 
     sub.add_parser("status", help="看每张表覆盖了哪些运行日")
 
@@ -50,11 +51,14 @@ def main(argv: list[str] | None = None) -> int:
             datasets=args.datasets,
             sleep_seconds=args.sleep,
             refresh=args.refresh,
+            archive=args.archive,
         )
         return 0
     if args.cmd == "status":
         return _status()
     if args.cmd == "watch":
+        from .weather import sync_weather_once
+        sync_weather_once()
         hour, minute = args.until.split(":", 1)
         return run_watch(until=clock_time(int(hour), int(minute)), pause_seconds=args.pause)
     if args.cmd == "export":
